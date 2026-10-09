@@ -1,22 +1,18 @@
 {
-  "short_name": "Planer",
-  "name": "Planer Markinhos - Controle Financeiro",
+  "short_name": "Planer 2026",
+  "name": "Dashboard Financeiro - Fabi e Marcão",
   "description": "Planilha de controle financeiro horizontal pessoal.",
   "icons": [
     {
-      "src": "icon-192.png",
+      "src": "./Logo Financeiro 512.png",
       "type": "image/png",
-      "sizes": "192x192"
-    },
-    {
-      "src": "icon-512.png",
-      "type": "image/png",
-      "sizes": "512x512"
+      "sizes": "512x512",
+      "purpose": "any maskable"
     }
   ],
-  "start_url": "index.html",
-  "background_color": "#0d1117",
-  "theme_color": "#0d1117",
+  "start_url": "./index.html",
+  "background_color": "#1a3a8f",
+  "theme_color": "#1a3a8f",
   "display": "standalone",
   "orientation": "portrait"
 }
