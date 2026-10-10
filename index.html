@@ -1301,7 +1301,6 @@
         }
 
         /* ========== CLASSE ESPECÍFICA PARA CAMPOS DE PORCENTAGEM ========== */
-        /* Garante que os inputs de porcentagem tenham aparência e comportamento nativos */
         .input-percentual {
             width: 60px !important;
             padding: 4px 6px !important;
@@ -1325,7 +1324,6 @@
             box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.2) !important;
         }
 
-        /* Remove o spinner apenas onde for necessário, mas mantém nas porcentagens */
         .input-percentual::-webkit-outer-spin-button,
         .input-percentual::-webkit-inner-spin-button {
             -webkit-appearance: inner-spin-button !important;
@@ -2197,6 +2195,24 @@
         };
         firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
+
+        // ==================== ATIVAÇÃO DO MODO OFFLINE NATIVO DO FIRESTORE ====================
+        // Habilita a persistência em disco (IndexedDB) para que o app continue funcionando
+        // sem internet, acumulando as escritas localmente até a conexão retornar.
+        firebase.firestore().enablePersistence()
+            .then(() => {
+                console.log("💾 Persistência offline ativada com sucesso!");
+            })
+            .catch((err) => {
+                if (err.code == 'failed-precondition') {
+                    console.warn("⚠️ Múltiplas abas abertas. Persistência offline ativa apenas na primeira aba.");
+                } else if (err.code == 'unimplemented') {
+                    console.warn("❌ O navegador atual não suporta persistência offline.");
+                } else {
+                    console.warn("⚠️ Não foi possível ativar a persistência offline:", err);
+                }
+            });
+
         const COLECAO = 'controles_2026';
 
         // ==================== IDENTIFICADOR ÚNICO DO APARELHO ====================
@@ -2208,6 +2224,9 @@
 
         const docRef = db.collection(COLECAO).doc(usuarioNuvemId);
 
+        // ==================== ESTADO GLOBAL: ÚLTIMO MÊS ATIVO ====================
+        let ultimoMesAtivoGlobal = 'janeiro';
+
         // ==================== FUNÇÕES DE SINCRONIZAÇÃO ====================
         function atualizarStatusNuvem(status) {
             const el = document.getElementById('cloudStatus');
@@ -2218,6 +2237,9 @@
             } else if (status === 'saving') {
                 el.className = 'cloud-status saving';
                 el.innerHTML = '<i class="fas fa-spinner fa-pulse"></i> Salvando...';
+            } else if (status === 'local') {
+                el.className = 'cloud-status saving';
+                el.innerHTML = '<i class="fas fa-history"></i> Salvo Local (Aguardando Conexão)';
             } else {
                 el.className = 'cloud-status offline';
                 el.innerHTML = '<i class="fas fa-cloud"></i> Offline';
@@ -2234,6 +2256,13 @@
             }, 500);
         }
 
+        /**
+         * Salva os dados em DUAS camadas:
+         *  1) localStorage IMEDIATAMENTE (backup local garantido contra fechamento de aba).
+         *  2) Firestore (que nativamente fila a escrita no cache IndexedDB se estiver offline).
+         *
+         * O status visual é vinculado ao estado real da conexão (navigator.onLine).
+         */
         function salvarDadosNaNuvem() {
             try {
                 const dadosParaSalvar = {};
@@ -2255,39 +2284,89 @@
                     if (d.bonusDez20) dadosParaSalvar[mes].bonusDez20 = d.bonusDez20;
                 });
 
+                const activeMonth = document.querySelector('.month-btn.active')?.dataset.month
+                                    || ultimoMesAtivoGlobal
+                                    || 'janeiro';
+
+                // Atualiza estado global
+                ultimoMesAtivoGlobal = activeMonth;
+
+                // ========================================================
+                // 1ª CAMADA: Salvamento IMEDIATO no localStorage
+                // (Backup Local Garantido contra fechamento de aba)
+                // ========================================================
+                localStorage.setItem('financialData2026', JSON.stringify(dadosParaSalvar));
+                localStorage.setItem('monthlyGoal', MONTHLY_INVESTMENT_GOAL);
+                localStorage.setItem('annualGoalEmergency', ANNUAL_GOALS.emergency);
+                localStorage.setItem('annualGoalTravel', ANNUAL_GOALS.travel);
+                localStorage.setItem('app_mes_ativo', activeMonth);
+                // Compatibilidade retroativa
+                localStorage.setItem('activeMonth2026', activeMonth);
+
                 const payload = {
                     dados: dadosParaSalvar,
+                    config: {
+                        ultimoMesAtivo: activeMonth,
+                        monthlyInvestmentGoal: MONTHLY_INVESTMENT_GOAL,
+                        annualGoalEmergency: ANNUAL_GOALS.emergency,
+                        annualGoalTravel: ANNUAL_GOALS.travel
+                    },
+                    // Compatibilidade retroativa com a estrutura antiga
                     metas: {
                         monthlyInvestmentGoal: MONTHLY_INVESTMENT_GOAL,
                         annualGoalEmergency: ANNUAL_GOALS.emergency,
                         annualGoalTravel: ANNUAL_GOALS.travel
                     },
-                    mesAtivo: document.querySelector('.month-btn.active')?.dataset.month || 'janeiro',
+                    mesAtivo: activeMonth,
                     atualizadoEm: firebase.firestore.FieldValue.serverTimestamp()
                 };
 
+                // ========================================================
+                // 2ª CAMADA: Envio para o Firestore
+                // (o cache local do Firestore gerencia a fila se estiver offline)
+                // ========================================================
                 docRef.set(payload, { merge: true })
                     .then(() => {
-                        atualizarStatusNuvem('online');
-                        console.log('✅ Dados salvos na nuvem com sucesso!');
+                        if (navigator.onLine) {
+                            atualizarStatusNuvem('online');
+                            console.log('✅ Dados salvos na nuvem com sucesso! Mês ativo:', activeMonth);
+                        } else {
+                            atualizarStatusNuvem('local');
+                            console.log('💾 Dados enfileirados no cache do Firestore (offline).');
+                        }
                     })
                     .catch((error) => {
-                        atualizarStatusNuvem('offline');
-                        console.error('❌ Erro ao salvar na nuvem:', error);
+                        console.error('❌ Erro operacional no Firestore:', error);
+                        if (!navigator.onLine) {
+                            atualizarStatusNuvem('local');
+                        } else {
+                            atualizarStatusNuvem('offline');
+                        }
                     });
+
+                // Se o navegador estiver offline, o Firestore guardou no cache:
+                // mudamos o status visual de forma amigável.
+                if (!navigator.onLine) {
+                    atualizarStatusNuvem('local');
+                }
             } catch (e) {
                 console.error('❌ Erro ao montar dados para salvar:', e);
-                atualizarStatusNuvem('offline');
             }
         }
 
+        /**
+         * Carrega todos os dados da nuvem (dados financeiros, metas e último mês ativo).
+         * Com a persistência offline ativada, esta leitura retorna primeiro do cache local
+         * e depois sincroniza com o servidor quando a conexão estiver disponível.
+         */
         function carregarDadosDaNuvem() {
-            docRef.get()
+            return docRef.get()
                 .then((doc) => {
                     if (doc.exists) {
                         const data = doc.data();
-                        console.log('☁️ Dados encontrados na nuvem, injetando...');
+                        console.log('☁️ Dados encontrados (cache ou nuvem), injetando...');
 
+                        // 1) Dados financeiros dos meses
                         if (data.dados) {
                             Object.keys(data.dados).forEach(mes => {
                                 if (monthlyData[mes]) {
@@ -2299,49 +2378,106 @@
                             });
                         }
 
-                        if (data.metas) {
-                            if (data.metas.monthlyInvestmentGoal) {
-                                MONTHLY_INVESTMENT_GOAL = data.metas.monthlyInvestmentGoal;
-                                localStorage.setItem('monthlyGoal', MONTHLY_INVESTMENT_GOAL);
-                            }
-                            if (data.metas.annualGoalEmergency) {
-                                ANNUAL_GOALS.emergency = data.metas.annualGoalEmergency;
-                                localStorage.setItem('annualGoalEmergency', ANNUAL_GOALS.emergency);
-                            }
-                            if (data.metas.annualGoalTravel) {
-                                ANNUAL_GOALS.travel = data.metas.annualGoalTravel;
-                                localStorage.setItem('annualGoalTravel', ANNUAL_GOALS.travel);
-                            }
+                        // 2) Configurações globais (novo formato + retrocompatibilidade)
+                        const cfg = data.config || {};
+                        const metas = data.metas || {};
+
+                        const monthlyGoalVal = cfg.monthlyInvestmentGoal !== undefined
+                            ? cfg.monthlyInvestmentGoal
+                            : (metas.monthlyInvestmentGoal !== undefined ? metas.monthlyInvestmentGoal : null);
+                        if (monthlyGoalVal !== null) {
+                            MONTHLY_INVESTMENT_GOAL = Number(monthlyGoalVal);
                         }
 
-                        if (data.mesAtivo && months.includes(data.mesAtivo)) {
-                            localStorage.setItem('activeMonth2026', data.mesAtivo);
+                        const emergencyVal = cfg.annualGoalEmergency !== undefined
+                            ? cfg.annualGoalEmergency
+                            : (metas.annualGoalEmergency !== undefined ? metas.annualGoalEmergency : null);
+                        if (emergencyVal !== null) {
+                            ANNUAL_GOALS.emergency = Number(emergencyVal);
                         }
 
-                        const mesAtivoSalvo = localStorage.getItem('activeMonth2026') || 'janeiro';
-                        const mesParaCarregar = months.includes(mesAtivoSalvo) ? mesAtivoSalvo : 'janeiro';
-                        switchMonth(mesParaCarregar);
+                        const travelVal = cfg.annualGoalTravel !== undefined
+                            ? cfg.annualGoalTravel
+                            : (metas.annualGoalTravel !== undefined ? metas.annualGoalTravel : null);
+                        if (travelVal !== null) {
+                            ANNUAL_GOALS.travel = Number(travelVal);
+                        }
 
-                        document.getElementById('monthlyGoalInput').value = formatCurrency(MONTHLY_INVESTMENT_GOAL);
-                        document.getElementById('metaEmergencyGoalInput').value = formatCurrency(ANNUAL_GOALS.emergency);
-                        document.getElementById('metaTravelGoalInput').value = formatCurrency(ANNUAL_GOALS.travel);
+                        const mesAtivoVal = cfg.ultimoMesAtivo || data.mesAtivo;
+                        if (mesAtivoVal && months.includes(mesAtivoVal)) {
+                            ultimoMesAtivoGlobal = mesAtivoVal;
+                            localStorage.setItem('app_mes_ativo', mesAtivoVal);
+                            localStorage.setItem('activeMonth2026', mesAtivoVal);
+                        }
 
-                        atualizarStatusNuvem('online');
-                        console.log('✅ Dados da nuvem carregados com sucesso!');
+                        // Atualiza inputs de metas
+                        const mgInput = document.getElementById('monthlyGoalInput');
+                        if (mgInput) mgInput.value = formatCurrency(MONTHLY_INVESTMENT_GOAL);
+                        const meInput = document.getElementById('metaEmergencyGoalInput');
+                        if (meInput) meInput.value = formatCurrency(ANNUAL_GOALS.emergency);
+                        const mtInput = document.getElementById('metaTravelGoalInput');
+                        if (mtInput) mtInput.value = formatCurrency(ANNUAL_GOALS.travel);
+
+                        // Renderiza o mês ativo recuperado
+                        switchMonth(ultimoMesAtivoGlobal, { pularSalvarNuvem: true });
+
+                        if (navigator.onLine) {
+                            atualizarStatusNuvem('online');
+                        } else {
+                            atualizarStatusNuvem('local');
+                        }
+
+                        console.log('✅ Dados carregados com sucesso! Mês ativo:', ultimoMesAtivoGlobal);
+                        return ultimoMesAtivoGlobal;
                     } else {
                         console.log('📭 Nenhum dado encontrado na nuvem para este usuário.');
-                        atualizarStatusNuvem('offline');
-                        const savedActiveMonth = localStorage.getItem('activeMonth2026');
-                        const initialMonth = (savedActiveMonth && months.includes(savedActiveMonth)) ? savedActiveMonth : 'janeiro';
-                        switchMonth(initialMonth);
+
+                        const savedActiveMonth = localStorage.getItem('app_mes_ativo')
+                                              || localStorage.getItem('activeMonth2026');
+                        const initialMonth = (savedActiveMonth && months.includes(savedActiveMonth))
+                            ? savedActiveMonth : 'janeiro';
+                        ultimoMesAtivoGlobal = initialMonth;
+                        switchMonth(initialMonth, { pularSalvarNuvem: true });
+
+                        if (navigator.onLine) {
+                            atualizarStatusNuvem('online');
+                        } else {
+                            atualizarStatusNuvem('local');
+                        }
+
+                        return initialMonth;
                     }
                 })
                 .catch((error) => {
                     console.error('❌ Erro ao carregar dados da nuvem:', error);
+
+                    // Fallback total: tenta carregar do localStorage
+                    const dadosLocais = localStorage.getItem('financialData2026');
+                    if (dadosLocais) {
+                        try {
+                            const parsed = JSON.parse(dadosLocais);
+                            Object.keys(parsed).forEach(mes => {
+                                if (monthlyData[mes]) {
+                                    Object.keys(parsed[mes]).forEach(key => {
+                                        monthlyData[mes][key] = parsed[mes][key];
+                                    });
+                                }
+                            });
+                            console.log('💾 Dados restaurados do localStorage (fallback).');
+                        } catch (e) {
+                            console.error('Erro ao parsear dados locais:', e);
+                        }
+                    }
+
+                    const savedActiveMonth = localStorage.getItem('app_mes_ativo')
+                                          || localStorage.getItem('activeMonth2026');
+                    const initialMonth = (savedActiveMonth && months.includes(savedActiveMonth))
+                        ? savedActiveMonth : 'janeiro';
+                    ultimoMesAtivoGlobal = initialMonth;
+                    switchMonth(initialMonth, { pularSalvarNuvem: true });
+
                     atualizarStatusNuvem('offline');
-                    const savedActiveMonth = localStorage.getItem('activeMonth2026');
-                    const initialMonth = (savedActiveMonth && months.includes(savedActiveMonth)) ? savedActiveMonth : 'janeiro';
-                    switchMonth(initialMonth);
+                    return initialMonth;
                 });
         }
 
@@ -2389,34 +2525,23 @@
         function ehCampoMonetario(input) {
             if (!input || input.tagName !== 'INPUT') return false;
 
-            // CORREÇÃO: Ignorar campos de descrição (texto) das tabelas de despesas
             if (input.classList.contains('editable') && input.closest('.payment-name')) return false;
-
-            // Exceções para campos de porcentagem e controles nativos
             if (input.classList.contains('input-percentual')) return false;
             if (input.classList.contains('percentage-input')) return false;
             if (input.type === 'number') return false;
 
-            // CORREÇÃO: Ignorar explicitamente os campos de porcentagem da distribuição familiar
             if (input.id === 'distEmergencyPct') return false;
             if (input.id === 'distTravelPct') return false;
             if (input.id === 'distLeisurePct') return false;
-
-            // Exceção extra: campo de porcentagem da Reserva Carro
             if (input.id === 'carroPercentageInput') return false;
 
-            // Inputs de meta com formatação manual
             if (input.id === 'monthlyGoalInput') return false;
             if (input.id === 'metaEmergencyGoalInput') return false;
             if (input.id === 'metaTravelGoalInput') return false;
 
-            // Input de arquivo do sistema de importação
             if (input.id === 'importFileInput') return false;
-
-            // Inputs de nome/descrição
             if (input.classList.contains('investment-name-input')) return false;
 
-            // Se chegou até aqui, é campo de valor monetário
             return true;
         }
 
@@ -3412,7 +3537,6 @@
                 const value = parseCurrency(input.value);
                 if (!isNaN(value) && value > 0) {
                     ANNUAL_GOALS.emergency = value;
-                    localStorage.setItem('annualGoalEmergency', value);
                     input.value = formatCurrency(value);
                     updateDynamicGoals();
                     agendarSalvarNuvem();
@@ -3426,7 +3550,6 @@
                 const value = parseCurrency(input.value);
                 if (!isNaN(value) && value > 0) {
                     ANNUAL_GOALS.travel = value;
-                    localStorage.setItem('annualGoalTravel', value);
                     input.value = formatCurrency(value);
                     updateDynamicGoals();
                     agendarSalvarNuvem();
@@ -3440,9 +3563,11 @@
 
         // ========== ATUALIZAR DASHBOARD ==========
         function updateDashboardData() {
-            const currentMonth = document.querySelector('.month-btn.active').dataset.month;
+            const currentMonth = document.querySelector('.month-btn.active')?.dataset.month || ultimoMesAtivoGlobal;
             const data = monthlyData[currentMonth];
             
+            if (!data) return;
+
             if (!data.totalRevenue) {
                 data.calculateTotals();
             }
@@ -3502,7 +3627,15 @@
         }
 
         // ========== FUNÇÃO PARA ALTERNAR MESES ==========
-        function switchMonth(month) {
+        function switchMonth(month, opts) {
+            const options = opts || {};
+
+            if (!months.includes(month)) month = 'janeiro';
+
+            ultimoMesAtivoGlobal = month;
+            localStorage.setItem('app_mes_ativo', month);
+            localStorage.setItem('activeMonth2026', month);
+
             document.querySelectorAll('.month-btn').forEach(btn => {
                 btn.classList.remove('active');
                 if (btn.dataset.month === month) {
@@ -3627,6 +3760,10 @@
             updateDistributionBox(month);
             
             updateDashboardData();
+
+            if (!options.pularSalvarNuvem) {
+                agendarSalvarNuvem();
+            }
         }
 
         // ========== FUNÇÕES DE CONFIGURAÇÕES ==========
@@ -3635,7 +3772,6 @@
             const value = parseCurrency(input.value);
             if (!isNaN(value) && value > 0) {
                 MONTHLY_INVESTMENT_GOAL = value;
-                localStorage.setItem('monthlyGoal', MONTHLY_INVESTMENT_GOAL);
                 input.value = formatCurrency(value);
                 updateDashboardData();
                 agendarSalvarNuvem();
@@ -3644,25 +3780,6 @@
                 alert('Por favor, insira um valor válido para a meta mensal.');
                 input.value = formatCurrency(MONTHLY_INVESTMENT_GOAL);
             }
-        }
-
-        // ========== CARREGAR META SALVA ==========
-        const savedGoal = localStorage.getItem('monthlyGoal');
-        if (savedGoal) {
-            MONTHLY_INVESTMENT_GOAL = parseFloat(savedGoal);
-            document.getElementById('monthlyGoalInput').value = formatCurrency(MONTHLY_INVESTMENT_GOAL);
-        }
-
-        const savedAnnualEmergency = localStorage.getItem('annualGoalEmergency');
-        if (savedAnnualEmergency) {
-            ANNUAL_GOALS.emergency = parseFloat(savedAnnualEmergency);
-            document.getElementById('metaEmergencyGoalInput').value = formatCurrency(ANNUAL_GOALS.emergency);
-        }
-
-        const savedAnnualTravel = localStorage.getItem('annualGoalTravel');
-        if (savedAnnualTravel) {
-            ANNUAL_GOALS.travel = parseFloat(savedAnnualTravel);
-            document.getElementById('metaTravelGoalInput').value = formatCurrency(ANNUAL_GOALS.travel);
         }
 
         // ========== FUNÇÕES DE NAVEGAÇÃO ==========
@@ -3709,7 +3826,6 @@
                 monthlyData[currentMonth].salaryFabi20 = parseCurrency(e.target.value);
                 monthlyData[currentMonth].calculateTotals();
                 switchMonth(currentMonth);
-                agendarSalvarNuvem();
             });
             
             document.getElementById('salaryMarcao20Input').addEventListener('change', (e) => {
@@ -3717,7 +3833,6 @@
                 monthlyData[currentMonth].salaryMarcao20 = parseCurrency(e.target.value);
                 monthlyData[currentMonth].calculateTotals();
                 switchMonth(currentMonth);
-                agendarSalvarNuvem();
             });
             
             document.getElementById('salaryFabi5Input').addEventListener('change', (e) => {
@@ -3725,7 +3840,6 @@
                 monthlyData[currentMonth].salaryFabi5 = parseCurrency(e.target.value);
                 monthlyData[currentMonth].calculateTotals();
                 switchMonth(currentMonth);
-                agendarSalvarNuvem();
             });
             
             document.getElementById('salaryMarcao5Input').addEventListener('change', (e) => {
@@ -3733,7 +3847,6 @@
                 monthlyData[currentMonth].salaryMarcao5 = parseCurrency(e.target.value);
                 monthlyData[currentMonth].calculateTotals();
                 switchMonth(currentMonth);
-                agendarSalvarNuvem();
             });
             
             document.getElementById('parc13Fabi20Input').addEventListener('change', (e) => {
@@ -3742,7 +3855,6 @@
                     monthlyData[currentMonth].bonusNov20[0].value = parseCurrency(e.target.value);
                     monthlyData[currentMonth].calculateTotals();
                     switchMonth(currentMonth);
-                    agendarSalvarNuvem();
                 }
             });
             
@@ -3752,7 +3864,6 @@
                     monthlyData[currentMonth].bonusNov20[1].value = parseCurrency(e.target.value);
                     monthlyData[currentMonth].calculateTotals();
                     switchMonth(currentMonth);
-                    agendarSalvarNuvem();
                 }
             });
             
@@ -3762,7 +3873,6 @@
                     monthlyData[currentMonth].bonusDez20[0].value = parseCurrency(e.target.value);
                     monthlyData[currentMonth].calculateTotals();
                     switchMonth(currentMonth);
-                    agendarSalvarNuvem();
                 }
             });
             
@@ -3772,7 +3882,6 @@
                     monthlyData[currentMonth].bonusDez20[1].value = parseCurrency(e.target.value);
                     monthlyData[currentMonth].calculateTotals();
                     switchMonth(currentMonth);
-                    agendarSalvarNuvem();
                 }
             });
             
@@ -3782,7 +3891,6 @@
                     monthlyData[currentMonth].bonusDez20[2].value = parseCurrency(e.target.value);
                     monthlyData[currentMonth].calculateTotals();
                     switchMonth(currentMonth);
-                    agendarSalvarNuvem();
                 }
             });
             
@@ -3792,7 +3900,6 @@
                     monthlyData[currentMonth].bonusDez20[3].value = parseCurrency(e.target.value);
                     monthlyData[currentMonth].calculateTotals();
                     switchMonth(currentMonth);
-                    agendarSalvarNuvem();
                 }
             });
         }
@@ -3812,12 +3919,11 @@
 
         // ========== SALVAR E REDEFINIR ==========
         saveBtn.addEventListener('click', () => {
-            localStorage.setItem('financialData2026', JSON.stringify(monthlyData));
-            localStorage.setItem('monthlyGoal', MONTHLY_INVESTMENT_GOAL);
-            localStorage.setItem('annualGoalEmergency', ANNUAL_GOALS.emergency);
-            localStorage.setItem('annualGoalTravel', ANNUAL_GOALS.travel);
-            const activeMonth = document.querySelector('.month-btn.active').dataset.month;
+            const activeMonth = document.querySelector('.month-btn.active')?.dataset.month || ultimoMesAtivoGlobal;
+            ultimoMesAtivoGlobal = activeMonth;
+            localStorage.setItem('app_mes_ativo', activeMonth);
             localStorage.setItem('activeMonth2026', activeMonth);
+
             salvarDadosNaNuvem();
             alert('Dados salvos com sucesso!');
         });
@@ -3828,26 +3934,12 @@
                 localStorage.removeItem('monthlyGoal');
                 localStorage.removeItem('annualGoalEmergency');
                 localStorage.removeItem('annualGoalTravel');
+                localStorage.removeItem('app_mes_ativo');
                 localStorage.removeItem('activeMonth2026');
+                // Mantém o usuario_nuvem_id para preservar o vínculo com o documento no Firebase
                 location.reload();
             }
         });
-
-        // ========== CARREGAR DADOS SALVOS ==========
-        function loadSavedData() {
-            const savedData = localStorage.getItem('financialData2026');
-            if (savedData) {
-                const parsedData = JSON.parse(savedData);
-                Object.keys(parsedData).forEach(month => {
-                    if (monthlyData[month]) {
-                        monthlyData[month] = {
-                            ...monthlyData[month],
-                            ...parsedData[month]
-                        };
-                    }
-                });
-            }
-        }
 
         // ========== IMPLEMENTAÇÃO DO SISTEMA DE BACKUP (EXPORTAR / IMPORTAR) ==========
         const exportBtn = document.getElementById('exportBtn');
@@ -3856,15 +3948,42 @@
 
         exportBtn.addEventListener('click', function() {
             try {
+                const dadosExportados = {};
+                Object.keys(monthlyData).forEach(mes => {
+                    const d = monthlyData[mes];
+                    dadosExportados[mes] = {
+                        salaryFabi20: d.salaryFabi20,
+                        salaryMarcao20: d.salaryMarcao20,
+                        salaryFabi5: d.salaryFabi5,
+                        salaryMarcao5: d.salaryMarcao5,
+                        distribuicaoReservas: d.distribuicaoReservas,
+                        expenses20: d.expenses20,
+                        expenses5: d.expenses5,
+                        investments20: d.investments20,
+                        investments5: d.investments5,
+                        childrenData: d.childrenData
+                    };
+                    if (d.bonusNov20) dadosExportados[mes].bonusNov20 = d.bonusNov20;
+                    if (d.bonusDez20) dadosExportados[mes].bonusDez20 = d.bonusDez20;
+                });
+
                 const backupData = {
                     app: 'Dashboard Financeiro - Fabi e Marcão',
-                    version: '1.0',
+                    version: '3.0',
                     exportedAt: new Date().toISOString(),
-                    financialData2026: localStorage.getItem('financialData2026'),
-                    monthlyGoal: localStorage.getItem('monthlyGoal'),
-                    annualGoalEmergency: localStorage.getItem('annualGoalEmergency'),
-                    annualGoalTravel: localStorage.getItem('annualGoalTravel'),
-                    activeMonth2026: localStorage.getItem('activeMonth2026')
+                    dados: dadosExportados,
+                    config: {
+                        ultimoMesAtivo: ultimoMesAtivoGlobal,
+                        monthlyInvestmentGoal: MONTHLY_INVESTMENT_GOAL,
+                        annualGoalEmergency: ANNUAL_GOALS.emergency,
+                        annualGoalTravel: ANNUAL_GOALS.travel
+                    },
+                    // Compatibilidade retroativa
+                    financialData2026: JSON.stringify(dadosExportados),
+                    monthlyGoal: MONTHLY_INVESTMENT_GOAL,
+                    annualGoalEmergency: ANNUAL_GOALS.emergency,
+                    annualGoalTravel: ANNUAL_GOALS.travel,
+                    activeMonth2026: ultimoMesAtivoGlobal
                 };
 
                 const jsonString = JSON.stringify(backupData, null, 2);
@@ -3900,29 +4019,11 @@
                         throw new Error('Arquivo inválido: estrutura não reconhecida.');
                     }
 
-                    const temDadosFinanceiros = importedData.financialData2026 !== undefined && importedData.financialData2026 !== null;
-                    const temMetasMensais = importedData.monthlyGoal !== undefined && importedData.monthlyGoal !== null;
-                    const temMetasEmergencia = importedData.annualGoalEmergency !== undefined && importedData.annualGoalEmergency !== null;
-                    const temMetasViagem = importedData.annualGoalTravel !== undefined && importedData.annualGoalTravel !== null;
-                    const temMesAtivo = importedData.activeMonth2026 !== undefined && importedData.activeMonth2026 !== null;
+                    const temDados = importedData.dados !== undefined && importedData.dados !== null;
+                    const temConfig = importedData.config !== undefined && importedData.config !== null;
+                    const temFormatoAntigo = importedData.financialData2026 !== undefined;
 
-                    let dadosMeses = null;
-                    if (!temDadosFinanceiros) {
-                        const chavesMeses = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
-                                             'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
-                        const temAlgumMes = chavesMeses.some(m => importedData[m] !== undefined);
-                        if (temAlgumMes) {
-                            dadosMeses = {};
-                            chavesMeses.forEach(m => {
-                                if (importedData[m] !== undefined) {
-                                    dadosMeses[m] = importedData[m];
-                                }
-                            });
-                        }
-                    }
-
-                    if (!temDadosFinanceiros && !temMetasMensais && !temMetasEmergencia && 
-                        !temMetasViagem && !temMesAtivo && !dadosMeses) {
+                    if (!temDados && !temConfig && !temFormatoAntigo) {
                         throw new Error('Arquivo inválido: não contém dados do dashboard financeiro.');
                     }
 
@@ -3936,48 +4037,67 @@
                         return;
                     }
 
-                    if (temDadosFinanceiros) {
-                        localStorage.setItem('financialData2026', importedData.financialData2026);
-                    } else if (dadosMeses) {
-                        localStorage.setItem('financialData2026', JSON.stringify(dadosMeses));
-                    } else if (importedData.dados || importedData.data) {
-                        const dados = importedData.dados || importedData.data;
-                        if (typeof dados === 'object') {
-                            localStorage.setItem('financialData2026', JSON.stringify(dados));
+                    let dadosMeses = null;
+                    if (temDados && typeof importedData.dados === 'object') {
+                        dadosMeses = importedData.dados;
+                    } else if (temFormatoAntigo) {
+                        try {
+                            dadosMeses = JSON.parse(importedData.financialData2026);
+                        } catch (_) {
+                            dadosMeses = null;
+                        }
+                    } else {
+                        const chavesMeses = months;
+                        const temAlgumMes = chavesMeses.some(m => importedData[m] !== undefined);
+                        if (temAlgumMes) {
+                            dadosMeses = {};
+                            chavesMeses.forEach(m => {
+                                if (importedData[m] !== undefined) dadosMeses[m] = importedData[m];
+                            });
                         }
                     }
 
-                    if (temMetasMensais) {
-                        localStorage.setItem('monthlyGoal', importedData.monthlyGoal);
-                    } else if (importedData.metaMensal !== undefined && importedData.metaMensal !== null) {
-                        localStorage.setItem('monthlyGoal', importedData.metaMensal);
-                    } else if (!localStorage.getItem('monthlyGoal')) {
-                        localStorage.setItem('monthlyGoal', '1500');
+                    if (dadosMeses) {
+                        Object.keys(dadosMeses).forEach(mes => {
+                            if (monthlyData[mes]) {
+                                const mesData = dadosMeses[mes];
+                                Object.keys(mesData).forEach(key => {
+                                    monthlyData[mes][key] = mesData[key];
+                                });
+                            }
+                        });
                     }
 
-                    if (temMetasEmergencia) {
-                        localStorage.setItem('annualGoalEmergency', importedData.annualGoalEmergency);
-                    } else if (importedData.metaEmergencia !== undefined && importedData.metaEmergencia !== null) {
-                        localStorage.setItem('annualGoalEmergency', importedData.metaEmergencia);
-                    } else if (!localStorage.getItem('annualGoalEmergency')) {
-                        localStorage.setItem('annualGoalEmergency', '5000');
+                    if (temConfig) {
+                        const cfg = importedData.config;
+                        if (cfg.monthlyInvestmentGoal !== undefined && cfg.monthlyInvestmentGoal !== null) {
+                            MONTHLY_INVESTMENT_GOAL = Number(cfg.monthlyInvestmentGoal);
+                        }
+                        if (cfg.annualGoalEmergency !== undefined && cfg.annualGoalEmergency !== null) {
+                            ANNUAL_GOALS.emergency = Number(cfg.annualGoalEmergency);
+                        }
+                        if (cfg.annualGoalTravel !== undefined && cfg.annualGoalTravel !== null) {
+                            ANNUAL_GOALS.travel = Number(cfg.annualGoalTravel);
+                        }
+                        if (cfg.ultimoMesAtivo && months.includes(cfg.ultimoMesAtivo)) {
+                            ultimoMesAtivoGlobal = cfg.ultimoMesAtivo;
+                        }
+                    } else if (temFormatoAntigo) {
+                        if (importedData.monthlyGoal) MONTHLY_INVESTMENT_GOAL = Number(importedData.monthlyGoal);
+                        if (importedData.annualGoalEmergency) ANNUAL_GOALS.emergency = Number(importedData.annualGoalEmergency);
+                        if (importedData.annualGoalTravel) ANNUAL_GOALS.travel = Number(importedData.annualGoalTravel);
+                        if (importedData.activeMonth2026 && months.includes(importedData.activeMonth2026)) {
+                            ultimoMesAtivoGlobal = importedData.activeMonth2026;
+                        }
                     }
 
-                    if (temMetasViagem) {
-                        localStorage.setItem('annualGoalTravel', importedData.annualGoalTravel);
-                    } else if (importedData.metaViagem !== undefined && importedData.metaViagem !== null) {
-                        localStorage.setItem('annualGoalTravel', importedData.metaViagem);
-                    } else if (!localStorage.getItem('annualGoalTravel')) {
-                        localStorage.setItem('annualGoalTravel', '5000');
-                    }
+                    localStorage.setItem('monthlyGoal', MONTHLY_INVESTMENT_GOAL);
+                    localStorage.setItem('annualGoalEmergency', ANNUAL_GOALS.emergency);
+                    localStorage.setItem('annualGoalTravel', ANNUAL_GOALS.travel);
+                    localStorage.setItem('app_mes_ativo', ultimoMesAtivoGlobal);
+                    localStorage.setItem('activeMonth2026', ultimoMesAtivoGlobal);
 
-                    if (temMesAtivo) {
-                        localStorage.setItem('activeMonth2026', importedData.activeMonth2026);
-                    } else if (importedData.mesAtivo !== undefined && importedData.mesAtivo !== null) {
-                        localStorage.setItem('activeMonth2026', importedData.mesAtivo);
-                    } else if (!localStorage.getItem('activeMonth2026')) {
-                        localStorage.setItem('activeMonth2026', 'janeiro');
-                    }
+                    salvarDadosNaNuvem();
 
                     alert('Dados importados com sucesso! A página será recarregada.');
                     location.reload();
@@ -3997,25 +4117,85 @@
         });
 
         // ==================== INICIALIZAÇÃO ====================
-        window.onload = function() {
-            loadSavedData();
+        window.addEventListener('DOMContentLoaded', function() {
             setupSalaryEventListeners();
             setupChildrenEventListeners();
             aplicarMelhoriasInputs();
-            
+
             observer.observe(document.body, {
                 childList: true,
                 subtree: true
             });
-            
-            const savedActiveMonth = localStorage.getItem('activeMonth2026');
+
+            // ==== 1) Contingência imediata via localStorage ====
+            const savedActiveMonth = localStorage.getItem('app_mes_ativo')
+                                  || localStorage.getItem('activeMonth2026');
             const initialMonth = (savedActiveMonth && months.includes(savedActiveMonth)) ? savedActiveMonth : 'janeiro';
-            switchMonth(initialMonth);
-            
+            ultimoMesAtivoGlobal = initialMonth;
+
+            // Carrega dados financeiros do localStorage (fallback rápido antes do Firestore)
+            const dadosLocais = localStorage.getItem('financialData2026');
+            if (dadosLocais) {
+                try {
+                    const parsed = JSON.parse(dadosLocais);
+                    Object.keys(parsed).forEach(mes => {
+                        if (monthlyData[mes]) {
+                            Object.keys(parsed[mes]).forEach(key => {
+                                monthlyData[mes][key] = parsed[mes][key];
+                            });
+                        }
+                    });
+                } catch (e) {
+                    console.error('Erro ao parsear dados locais:', e);
+                }
+            }
+
+            // Metas em memória (podem ser sobrescritas pelo Firebase)
+            const savedGoal = localStorage.getItem('monthlyGoal');
+            if (savedGoal) MONTHLY_INVESTMENT_GOAL = parseFloat(savedGoal) || MONTHLY_INVESTMENT_GOAL;
+
+            const savedAnnualEmergency = localStorage.getItem('annualGoalEmergency');
+            if (savedAnnualEmergency) ANNUAL_GOALS.emergency = parseFloat(savedAnnualEmergency) || ANNUAL_GOALS.emergency;
+
+            const savedAnnualTravel = localStorage.getItem('annualGoalTravel');
+            if (savedAnnualTravel) ANNUAL_GOALS.travel = parseFloat(savedAnnualTravel) || ANNUAL_GOALS.travel;
+
+            const mgInput = document.getElementById('monthlyGoalInput');
+            if (mgInput) mgInput.value = formatCurrency(MONTHLY_INVESTMENT_GOAL);
+            const meInput = document.getElementById('metaEmergencyGoalInput');
+            if (meInput) meInput.value = formatCurrency(ANNUAL_GOALS.emergency);
+            const mtInput = document.getElementById('metaTravelGoalInput');
+            if (mtInput) mtInput.value = formatCurrency(ANNUAL_GOALS.travel);
+
+            // Renderização IMEDIATA no mês salvo localmente
+            switchMonth(initialMonth, { pularSalvarNuvem: true });
+
+            // ==== 2) Busca assíncrona na nuvem (fonte da verdade) ====
             carregarDadosDaNuvem();
-            
-            atualizarStatusNuvem('offline');
-        };
+
+            // Define o status inicial baseado no estado real da conexão
+            if (!navigator.onLine) {
+                atualizarStatusNuvem('local');
+            } else {
+                atualizarStatusNuvem('offline');
+            }
+        });
+
+        // ==================== MONITORAMENTO EM TEMPO REAL DA CONEXÃO ====================
+        window.addEventListener('online', () => {
+            atualizarStatusNuvem('online');
+            salvarDadosNaNuvem(); // Força a sincronização imediata dos dados acumulados offline
+            console.log("🌐 Internet restaurada! Sincronizando com a nuvem...");
+        });
+
+        window.addEventListener('offline', () => {
+            const el = document.getElementById('cloudStatus');
+            if (el) {
+                el.className = 'cloud-status offline';
+                el.innerHTML = '<i class="fas fa-wifi-slash"></i> Modo Offline Ativo';
+            }
+            console.log("🔌 O dispositivo perdeu a conexão com a internet.");
+        });
 
     </script>
 </body>
